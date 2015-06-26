@@ -9,20 +9,27 @@
 #include <E/E_Common.hpp>
 #include <E/Networking/E_Host.hpp>
 #include <E/Networking/E_Networking.hpp>
-#include <cerrno>
-#include <string.h>
 #include <E/Networking/E_Packet.hpp>
 #include <E/Networking/E_NetworkUtil.hpp>
+
+#include <cerrno>
+#include <string.h>
+#include <memory.h>
+#include <time.h>
+#include <stdlib.h>
+
 #include "TCPAssignment.hpp"
 
 namespace E
 {
 
-TCPAssignment::TCPAssignment(Host* host) : HostModule("TCP", host),
-		NetworkModule(this->getHostModuleName(), host->getNetworkSystem()),
-		SystemCallInterface(AF_INET, IPPROTO_TCP, host),
-		NetworkLog(host->getNetworkSystem()),
-		TimerModule(host->getSystem())
+TCPAssignment::TCPAssignment(Host* host)
+	: SessionHandler()
+	, HostModule("TCP", host)
+	, NetworkModule(this->getHostModuleName(), host->getNetworkSystem())
+	, SystemCallInterface(AF_INET, IPPROTO_TCP, host)
+	, NetworkLog(host->getNetworkSystem())
+	, TimerModule(host->getSystem())
 {
 
 }
@@ -34,12 +41,11 @@ TCPAssignment::~TCPAssignment()
 
 void TCPAssignment::initialize()
 {
-
+	srand((unsigned int)time(NULL));
 }
 
 void TCPAssignment::finalize()
 {
-
 }
 
 void TCPAssignment::systemCallback(UUID syscallUUID, int pid, const SystemCallParameter& param)
@@ -59,16 +65,13 @@ void TCPAssignment::systemCallback(UUID syscallUUID, int pid, const SystemCallPa
 		//this->syscall_write(syscallUUID, pid, param.param1_int, param.param2_ptr, param.param3_int);
 		break;
 	case CONNECT:
-		//this->syscall_connect(syscallUUID, pid, param.param1_int,
-		//		static_cast<struct sockaddr*>(param.param2_ptr), (socklen_t)param.param3_int);
+		syscall_connect(syscallUUID, pid, param.param1_int, (const struct sockaddr *)param.param2_ptr, (socklen_t)param.param3_int);
 		break;
 	case LISTEN:
-		//this->syscall_listen(syscallUUID, pid, param.param1_int, param.param2_int);
+		syscall_listen(syscallUUID, pid, param.param1_int, param.param2_int);
 		break;
 	case ACCEPT:
-		//this->syscall_accept(syscallUUID, pid, param.param1_int,
-		//		static_cast<struct sockaddr*>(param.param2_ptr),
-		//		static_cast<socklen_t*>(param.param3_ptr));
+		syscall_accept(syscallUUID, pid, param.param1_int, (struct sockaddr *)param.param2_ptr, (socklen_t)param.param3_int);
 		break;
 	case BIND:
 		syscall_bind(syscallUUID, pid, param.param1_int, (const struct sockaddr *)param.param2_ptr, (socklen_t)param.param3_int);
@@ -77,9 +80,7 @@ void TCPAssignment::systemCallback(UUID syscallUUID, int pid, const SystemCallPa
 		syscall_getsockname(syscallUUID, pid, param.param1_int, (struct sockaddr *)param.param2_ptr, (socklen_t)param.param3_int);
 		break;
 	case GETPEERNAME:
-		//this->syscall_getpeername(syscallUUID, pid, param.param1_int,
-		//		static_cast<struct sockaddr *>(param.param2_ptr),
-		//		static_cast<socklen_t*>(param.param3_ptr));
+		syscall_getpeername(syscallUUID, pid, param.param1_int, (struct sockaddr *)param.param2_ptr, (socklen_t)param.param3_int);
 		break;
 	default:
 		assert(0);
@@ -88,17 +89,84 @@ void TCPAssignment::systemCallback(UUID syscallUUID, int pid, const SystemCallPa
 
 void TCPAssignment::packetArrived(std::string fromModule, Packet* packet)
 {
+	void *payload;
+	size_t size;
+	struct hdr hdr;
+	Session *session = NULL;
 
+	if(fromModule.compare("IPv4") || packet->getSize() < sizeof(struct hdr))
+	{
+		freePacket(packet);
+		return;
+	}
+
+	size = packet->getSize() - sizeof(struct hdr);
+	if(size)
+	{
+		payload = malloc(size);
+	}
+	packet->readData(0, &hdr, sizeof(struct hdr));
+	packet->readData(sizeof(struct hdr), payload, size);
+
+	session = lookupSession(EndPoint(ntohl(hdr.ip.daddr), ntohs(hdr.tcp.dest)), EndPoint(ntohl(hdr.ip.saddr), ntohs(hdr.tcp.source)));
+	if(session)
+	{
+		session->onPacket(&hdr, payload, size);
+	}
+
+	freePacket(packet);
+	if(size)
+	{
+		free(payload);
+	}
 }
 
 void TCPAssignment::timerCallback(void* payload)
 {
+}
 
+void TCPAssignment::sendPacket(struct hdr *hdr, void *payload, size_t size)
+{
+	Packet *packet = allocatePacket(sizeof(struct hdr) + size);
+	void *dummy;
+	
+	dummy = malloc(sizeof(struct tcphdr) + size);
+	memcpy(dummy, &hdr->tcp, sizeof(struct tcphdr));
+	memcpy((void*)((uint16_t *)dummy + sizeof(struct tcphdr)), payload, size);
+	hdr->tcp.check = htons(~NetworkUtil::tcp_sum(hdr->ip.saddr, hdr->ip.daddr, (uint8_t *)dummy, sizeof(struct tcphdr) + size));
+	free(dummy);
+
+	packet->writeData(0, hdr, sizeof(struct hdr));
+	packet->writeData(sizeof(struct hdr), payload, size);
+	HostModule::sendPacket(std::string("IPv4"), packet);
+}
+
+void TCPAssignment::onReady(Session *request, Session *response)
+{
+	std::multimap<Session *, std::tuple<UUID, int, int, struct sockaddr *, socklen_t> > ::iterator it;
+	std::map<Session *, std::tuple<UUID, int, int> > ::iterator jt;
+
+	it = acceptCall.find(request);
+	jt = connectCall.find(request);
+	if(it != acceptCall.end())
+	{
+		syscall_accept_return(std::get<0>(it->second), std::get<1>(it->second), std::get<2>(it->second), std::get<3>(it->second), std::get<4>(it->second), response);
+		acceptCall.erase(it);
+	}
+	else if(jt != connectCall.end())
+	{
+		syscall_connect_return(std::get<0>(jt->second), std::get<1>(it->second), std::get<2>(it->second), 0);
+		connectCall.erase(jt);
+	}
+	else
+	{
+		acceptSession.insert(std::make_pair(request, response));
+	}
 }
 
 void TCPAssignment::syscall_socket(UUID syscallUUID, int pid, int domain, int type, int protocol)
 {
-	int fd;
+	int socket;
 
 	if(domain != AF_INET || type != SOCK_STREAM || protocol != IPPROTO_TCP)
 	{
@@ -106,80 +174,162 @@ void TCPAssignment::syscall_socket(UUID syscallUUID, int pid, int domain, int ty
 		return;
 	}
 
-	fd = createFileDescriptor(pid);
-	sockets.insert(std::make_tuple(pid, fd));
-	returnSystemCall(syscallUUID, fd);
+	socket = createFileDescriptor(pid);
+	sessions[std::make_pair(pid, socket)] = new Session(this);
+	returnSystemCall(syscallUUID, socket);
 }
 
 void TCPAssignment::syscall_close(UUID syscallUUID, int pid, int socket)
 {
-	std::tuple<int, int> owner(pid, socket);
-	auto it = sockets.find(owner);
-	auto jt = binds.find(owner);
+	Session *session = lookupSession(pid, socket);
 
-	if(it == sockets.end())
+
+	if(session == NULL)
 	{
 		returnSystemCall(syscallUUID, -1);
 		return;
 	}
 
-	if(jt != binds.end())
-	{
-		ports.erase(jt->second);
-		binds.erase(jt);
-	}
+	sessions.erase(std::make_pair(pid, socket));
 	removeFileDescriptor(pid, socket);
-	sockets.erase(it);
-	returnSystemCall(syscallUUID, 0);
+	returnSystemCall(syscallUUID, session->onClose());
 }
 
-void TCPAssignment::syscall_bind(UUID syscallUUID, int pid, int socket, const struct sockaddr *address, socklen_t address_len)
+void TCPAssignment::syscall_connect(UUID syscallUUID, int pid, int socket, const struct sockaddr *address, socklen_t address_len)
 {
-	const struct sockaddr_in *address_in = (const struct sockaddr_in *)address;
-	uint32_t addr = ntohl(address_in->sin_addr.s_addr);
-	uint16_t port = ntohs(address_in->sin_port);
-	std::tuple<int, int> owner(pid, socket);
-	std::tuple<uint32_t, uint16_t> endpt(addr, port);
+	uint32_t addr;
+	uint16_t port;
+	struct sockaddr_in *address_in = (struct sockaddr_in *)address;
+	Session *session = lookupSession(pid, socket);
+	std::set<Session *> ::iterator it;
 
-	if(sockets.find(owner) == sockets.end())
+	if(session == NULL || session->getRemote().isValid())
 	{
 		returnSystemCall(syscallUUID, -1);
 		return;
 	}
 
-	if(address_len < sizeof(struct sockaddr_in) || address_in->sin_family != AF_INET || binds.find(owner) != binds.end())
+	if(!session->getLocal().isValid())
 	{
-		returnSystemCall(syscallUUID, -1);
-		return;
-	}
-
-	for(auto it = ports.begin(); it != ports.end(); it++)
-	{
-		if(std::get<1>(it->first) == port && (std::get<0>(it->first) == INADDR_ANY || addr == INADDR_ANY || std::get<0>(it->first) == addr))
+		getHost()->getIPAddr((uint8_t *)&addr, 0);
+		addr = ntohl(addr);
+		while(true)
+		{
+			port = (uint16_t)(rand() % (0x10000 - 0x400) + 0x400);
+			for(it = binds.begin(); it != binds.end(); it++)
+			{
+				if((*it)->getLocal() == EndPoint(addr, port))
+				{
+					break;
+				}
+			}
+			if(it == binds.end())
+			{
+				break;
+			}
+		}
+		if(session->onBind(EndPoint(addr, port)) < 0)
 		{
 			returnSystemCall(syscallUUID, -1);
 			return;
 		}
 	}
 
-	binds[owner] = endpt;
-	ports[endpt] = owner;
-	returnSystemCall(syscallUUID, 0);
-}
-
-void TCPAssignment::syscall_getsockname(UUID syscallUUID, int pid, int socket, struct sockaddr *address, socklen_t address_len)
-{
-	struct sockaddr_in *address_in = (struct sockaddr_in *)address;
-	std::tuple<int, int> owner(pid, socket);
-	auto it = binds.find(owner);
-
-	if(sockets.find(owner) == sockets.end())
+	if(session->onConnect(EndPoint(htonl(address_in->sin_addr.s_addr), htons(address_in->sin_port))) < 0)
 	{
 		returnSystemCall(syscallUUID, -1);
 		return;
 	}
 
-	if(address_len < sizeof(struct sockaddr_in) || it == binds.end())
+	connectCall.insert(std::make_pair(session, std::make_tuple(syscallUUID, pid, socket)));
+}
+
+void TCPAssignment::syscall_connect_return(UUID syscallUUID, int pid, int socket, int result)
+{
+	returnSystemCall(syscallUUID, result);
+}
+
+void TCPAssignment::syscall_listen(UUID syscallUUID, int pid, int socket, int backlog)
+{
+	Session *session = lookupSession(pid, socket);
+
+	if(session == NULL || binds.find(session) == binds.end())
+	{
+		returnSystemCall(syscallUUID, -1);
+		return;
+	}
+
+	returnSystemCall(syscallUUID, session->onListen(backlog));
+}
+
+void TCPAssignment::syscall_accept(UUID syscallUUID, int pid, int socket, struct sockaddr *address, socklen_t address_len)
+{
+	Session *session = lookupSession(pid, socket);
+	std::multimap<Session *, Session *> ::iterator it;
+
+	if(session == NULL || address_len < sizeof(struct sockaddr_in))
+	{
+		returnSystemCall(syscallUUID, -1);
+		return;
+	}
+
+	it = acceptSession.find(session);
+	if(it == acceptSession.end())
+	{
+		acceptCall.insert(std::make_pair(session, std::make_tuple(syscallUUID, pid, socket, address, address_len)));
+	}
+	else
+	{
+		syscall_accept_return(syscallUUID, pid, socket, address, address_len, it->second);
+		acceptSession.erase(it);
+	}
+}
+
+void TCPAssignment::syscall_accept_return(UUID syscallUUID, int pid, int socket, const struct sockaddr *address, socklen_t address_len, Session *session)
+{
+	struct sockaddr_in *address_in = (struct sockaddr_in *)address;
+	memset(address_in, 0, sizeof(struct sockaddr_in));
+	address_in->sin_family = AF_INET;
+	address_in->sin_addr.s_addr = htonl(session->getLocal().addr);
+	address_in->sin_port = htons(session->getLocal().port);
+
+	socket = createFileDescriptor(pid);
+	sessions[std::make_pair(pid, socket)] = session;
+
+	returnSystemCall(syscallUUID, socket);
+}
+
+void TCPAssignment::syscall_bind(UUID syscallUUID, int pid, int socket, const struct sockaddr *address, socklen_t address_len)
+{
+	struct sockaddr_in *address_in = (struct sockaddr_in *)address;
+	Session *session = lookupSession(pid, socket);
+	EndPoint local(ntohl(address_in->sin_addr.s_addr), ntohs(address_in->sin_port));
+
+	if(session == NULL || address_len < sizeof(struct sockaddr_in) || address_in->sin_family != AF_INET || binds.find(session) != binds.end())
+	{
+		returnSystemCall(syscallUUID, -1);
+		return;
+	}
+
+	for(auto it = binds.begin(); it != binds.end(); it++)
+	{
+		if(local == (*it)->getLocal())
+		{
+			returnSystemCall(syscallUUID, -1);
+			return;
+		}
+	}
+
+	returnSystemCall(syscallUUID, session->onBind(local));
+}
+
+void TCPAssignment::syscall_getsockname(UUID syscallUUID, int pid, int socket, struct sockaddr *address, socklen_t address_len)
+{
+	struct sockaddr_in *address_in = (struct sockaddr_in *)address;
+	Session *session = lookupSession(pid, socket);
+	std::multimap<Session *, Session *> ::iterator it;
+
+	if(session == NULL || address_len < sizeof(struct sockaddr_in) || binds.find(session) == binds.end() || !session->getLocal().isValid())
 	{
 		returnSystemCall(syscallUUID, -1);
 		return;
@@ -187,8 +337,29 @@ void TCPAssignment::syscall_getsockname(UUID syscallUUID, int pid, int socket, s
 
 	memset(address_in, 0, sizeof(struct sockaddr_in));
 	address_in->sin_family = AF_INET;
-	address_in->sin_addr.s_addr = htonl(std::get<0>(it->second));
-	address_in->sin_port = htons(std::get<1>(it->second));
+	address_in->sin_addr.s_addr = htonl(session->getLocal().addr);
+	address_in->sin_port = htons(session->getLocal().port);
+
+	returnSystemCall(syscallUUID, 0);
+}
+
+void TCPAssignment::syscall_getpeername(UUID syscallUUID, int pid, int socket, struct sockaddr *address, socklen_t address_len)
+{
+	struct sockaddr_in *address_in = (struct sockaddr_in *)address;
+	Session *session = lookupSession(pid, socket);
+	std::multimap<Session *, Session *> ::iterator it;
+
+	if(session == NULL || address_len < sizeof(struct sockaddr_in) || binds.find(session) == binds.end() || !session->getRemote().isValid())
+	{
+		returnSystemCall(syscallUUID, -1);
+		return;
+	}
+
+	memset(address_in, 0, sizeof(struct sockaddr_in));
+	address_in->sin_family = AF_INET;
+	address_in->sin_addr.s_addr = htonl(session->getRemote().addr);
+	address_in->sin_port = htons(session->getRemote().port);
+
 	returnSystemCall(syscallUUID, 0);
 }
 
