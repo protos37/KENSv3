@@ -31,14 +31,16 @@ protected:
 	std::multimap<Session *, std::tuple<UUID, int, int, struct sockaddr *, socklen_t> > acceptCall;
 	std::multimap<Session *, Session *> acceptSession;
 	std::map<Session *, std::tuple<UUID, int, int> > connectCall;
+	std::map<Session *, std::tuple<UUID, void *, size_t> > readCall, writeCall;
+	std::map<Session *, UUID> closeCall;
 
 	virtual void systemCallback(UUID syscallUUID, int pid, const SystemCallParameter& param) final;
 	virtual void packetArrived(std::string fromModule, Packet* packet) final;
 	virtual void timerCallback(void* payload) final;
-	virtual void sendPacket(struct hdr *hdr, void *payload, size_t size);
-	virtual void onReady(Session *request, Session *response);
 	virtual void syscall_socket(UUID syscallUUID, int pid, int domain, int type, int protocol);
 	virtual void syscall_close(UUID syscallUUID, int pid, int socket);
+	virtual void syscall_read(UUID syscallUUID, int pid, int socket, void *payload, size_t size);
+	virtual void syscall_write(UUID syscallUUID, int pid, int socket, void *payload, size_t size);
 	virtual void syscall_connect(UUID syscallUUID, int pid, int socket, const struct sockaddr *address, socklen_t address_len);
 	virtual void syscall_connect_return(UUID syscallUUID, int pid, int socket, int result);
 	virtual void syscall_listen(UUID syscallUUID, int pid, int socket, int backlog);
@@ -53,6 +55,9 @@ public:
 	virtual void initialize();
 	virtual void finalize();
 	virtual ~TCPAssignment();
+	virtual void sendPacket(struct hdr *hdr, void *payload, size_t size);
+	virtual void onReady(Session *request, Session *response);
+	virtual void onData(Session *request);
 };
 
 class TCPAssignmentProvider

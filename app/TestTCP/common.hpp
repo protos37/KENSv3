@@ -16,6 +16,9 @@
 #define TCP_URG 0x20
 #define TCP_FLAG(hdr) (hdr.fin | (hdr.syn << 1) | (hdr.rst << 2) | (hdr.psh << 3) | (hdr.ack << 4) | (hdr.urg << 5))
 
+#define BUFFER_SIZE (204800)
+#define WINDOW_SIZE (51200)
+
 struct ethhdr
 {
 	unsigned char h_dest[ETH_ALEN];

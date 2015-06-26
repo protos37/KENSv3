@@ -9,6 +9,7 @@ class EndPoint;
 class Session;
 
 #include "common.hpp"
+#include "Chunk.hpp"
 #include "SessionHandler.hpp"
 
 class EndPoint
@@ -46,13 +47,16 @@ protected:
 
 	State state;
 	int backlog;
-	uint32_t seq, ack_seq;
+	uint32_t base, ack_base, seq, ack_seq, nwnd, cwnd, pwnd;
 	EndPoint local, remote;
 	SessionHandler *handler;
 	Session *parent;
 	std::set<Session *> waiters;
+	QueuedBuffer send, insend, inrecv;
+	IndexedBuffer recv;
 
-	void sendPacket(uint8_t flag, void *payload, size_t size);
+	void recvChunk(std::shared_ptr<Chunk> chunk, size_t offset);
+	void sendChunk(std::shared_ptr<Chunk> chunk);
 
 public:
 	Session(SessionHandler *_handler);
@@ -61,8 +65,13 @@ public:
 	int onListen(int _backlog);
 	int onConnect(EndPoint _remote);
 	int onPacket(struct hdr *hdr, void *payload, size_t size);
+	int onRead(void *payload, size_t size);
+	int onWrite(void *payload, size_t size);
 	int onClose();
 	int onReady(Session *session);
+	void sendPacket(uint8_t flag, void *payload, size_t size);
+	bool isReadable();
+	bool isWritable();
 	EndPoint getLocal();
 	EndPoint getRemote();
 };

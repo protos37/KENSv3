@@ -22,6 +22,10 @@ void SessionHandler::onReady(Session *request, Session *response)
 {
 }
 
+void SessionHandler::onData(Session *request)
+{
+}
+
 Session *SessionHandler::lookupSession(int pid, int socket)
 {
 	std::map<std::pair<int, int>, Session *> ::iterator it;

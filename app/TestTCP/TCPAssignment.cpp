@@ -53,27 +53,35 @@ void TCPAssignment::systemCallback(UUID syscallUUID, int pid, const SystemCallPa
 	switch(param.syscallNumber)
 	{
 	case SOCKET:
+//		printf("socket()\n");
 		syscall_socket(syscallUUID, pid, param.param1_int, param.param2_int, param.param3_int);
 		break;
 	case CLOSE:
+//		printf("close()\n");
 		syscall_close(syscallUUID, pid, param.param1_int);
 		break;
 	case READ:
-		//this->syscall_read(syscallUUID, pid, param.param1_int, param.param2_ptr, param.param3_int);
+//		printf("read()\n");
+		syscall_read(syscallUUID, pid, param.param1_int, param.param2_ptr, (size_t)param.param3_int);
 		break;
 	case WRITE:
-		//this->syscall_write(syscallUUID, pid, param.param1_int, param.param2_ptr, param.param3_int);
+//		printf("write()\n");
+		syscall_write(syscallUUID, pid, param.param1_int, param.param2_ptr, (size_t)param.param3_int);
 		break;
 	case CONNECT:
+//		printf("connect()\n");
 		syscall_connect(syscallUUID, pid, param.param1_int, (const struct sockaddr *)param.param2_ptr, (socklen_t)param.param3_int);
 		break;
 	case LISTEN:
+//		printf("liste()\n");
 		syscall_listen(syscallUUID, pid, param.param1_int, param.param2_int);
 		break;
 	case ACCEPT:
+//		printf("accept()\n");
 		syscall_accept(syscallUUID, pid, param.param1_int, (struct sockaddr *)param.param2_ptr, (socklen_t)param.param3_int);
 		break;
 	case BIND:
+//		printf("bind()\n");
 		syscall_bind(syscallUUID, pid, param.param1_int, (const struct sockaddr *)param.param2_ptr, (socklen_t)param.param3_int);
 		break;
 	case GETSOCKNAME:
@@ -132,7 +140,7 @@ void TCPAssignment::sendPacket(struct hdr *hdr, void *payload, size_t size)
 	
 	dummy = malloc(sizeof(struct tcphdr) + size);
 	memcpy(dummy, &hdr->tcp, sizeof(struct tcphdr));
-	memcpy((void*)((uint16_t *)dummy + sizeof(struct tcphdr)), payload, size);
+	memcpy((void*)((uint8_t *)dummy + sizeof(struct tcphdr)), payload, size);
 	hdr->tcp.check = htons(~NetworkUtil::tcp_sum(hdr->ip.saddr, hdr->ip.daddr, (uint8_t *)dummy, sizeof(struct tcphdr) + size));
 	free(dummy);
 
@@ -155,12 +163,43 @@ void TCPAssignment::onReady(Session *request, Session *response)
 	}
 	else if(jt != connectCall.end())
 	{
-		syscall_connect_return(std::get<0>(jt->second), std::get<1>(it->second), std::get<2>(it->second), 0);
+		if(response)
+		{
+			syscall_connect_return(std::get<0>(jt->second), std::get<1>(it->second), std::get<2>(it->second), 0);
+		}
+		else
+		{
+			syscall_connect_return(std::get<0>(jt->second), std::get<1>(it->second), std::get<2>(it->second), -1);
+		}
 		connectCall.erase(jt);
 	}
 	else
 	{
 		acceptSession.insert(std::make_pair(request, response));
+	}
+}
+
+void TCPAssignment::onData(Session *request)
+{
+	std::map<Session *, std::tuple<UUID, void *, size_t> > ::iterator it;
+	std::map<Session *, UUID> ::iterator jt;
+	it = readCall.find(request);
+	if(it != readCall.end() && request->isReadable())
+	{
+		returnSystemCall(std::get<0>(it->second), request->onRead(std::get<1>(it->second), std::get<2>(it->second)));
+		readCall.erase(it);
+	}
+	it = writeCall.find(request);
+	if(it != writeCall.end() && request->isWritable())
+	{
+		returnSystemCall(std::get<0>(it->second), request->onWrite(std::get<1>(it->second), std::get<2>(it->second)));
+		writeCall.erase(it);
+	}
+	jt = closeCall.find(request);
+	if(jt != closeCall.end() && request->isWritable())
+	{
+		returnSystemCall(jt->second, request->onClose());
+		closeCall.erase(jt);
 	}
 }
 
@@ -183,6 +222,26 @@ void TCPAssignment::syscall_close(UUID syscallUUID, int pid, int socket)
 {
 	Session *session = lookupSession(pid, socket);
 
+	if(session == NULL)
+	{
+		returnSystemCall(syscallUUID, -1);
+		return;
+	}
+
+	if(session->isWritable())
+	{
+		sessions.erase(std::make_pair(pid, socket));
+		removeFileDescriptor(pid, socket);
+		returnSystemCall(syscallUUID, session->onClose());
+		return;
+	}
+
+	closeCall[session] = syscallUUID;
+}
+
+void TCPAssignment::syscall_read(UUID syscallUUID, int pid, int socket, void *payload, size_t size)
+{
+	Session *session = lookupSession(pid, socket);
 
 	if(session == NULL)
 	{
@@ -190,9 +249,32 @@ void TCPAssignment::syscall_close(UUID syscallUUID, int pid, int socket)
 		return;
 	}
 
-	sessions.erase(std::make_pair(pid, socket));
-	removeFileDescriptor(pid, socket);
-	returnSystemCall(syscallUUID, session->onClose());
+	if(session->isReadable())
+	{
+		returnSystemCall(syscallUUID, session->onRead(payload, size));
+		return;
+	}
+
+	readCall[session] = std::make_tuple(syscallUUID, payload, size);
+}
+
+void TCPAssignment::syscall_write(UUID syscallUUID, int pid, int socket, void *payload, size_t size)
+{
+	Session *session = lookupSession(pid, socket);
+
+	if(session == NULL)
+	{
+		returnSystemCall(syscallUUID, -1);
+		return;
+	}
+	
+	if(session->isWritable())
+	{
+		returnSystemCall(syscallUUID, session->onWrite(payload, size));
+		return;
+	}
+
+	writeCall[session] = std::make_tuple(syscallUUID, payload, size);
 }
 
 void TCPAssignment::syscall_connect(UUID syscallUUID, int pid, int socket, const struct sockaddr *address, socklen_t address_len)

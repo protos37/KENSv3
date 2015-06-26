@@ -24,6 +24,7 @@ public:
 	virtual void unbindSession(Session *session);
 	virtual void sendPacket(struct hdr *hdr, void *payload, size_t size);
 	virtual void onReady(Session *request, Session *response);
+	virtual void onData(Session *request);
 };
 
 #endif
